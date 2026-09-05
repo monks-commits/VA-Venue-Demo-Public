@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Venue Demo Hall</title>
+<style>
+:root{--bg:#f4f7fa;--panel:#ffffff;--line:#d7e0e8;--text:#142231;--muted:#6e7f90;--stage:#8c929a;--seat:#e2e8ee;--seat-border:#b7c3ce;--green:#31b969;--amber:#f0b33c;--sold:#697684}
+*{box-sizing:border-box}html,body{margin:0;min-height:100%;background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,"Segoe UI",Arial,sans-serif}
+body{padding:14px}.page{max-width:1100px;margin:0 auto}.top{display:flex;justify-content:space-between;gap:14px;align-items:flex-start;flex-wrap:wrap;margin-bottom:10px}.title{font-size:22px;font-weight:850}.sub{color:var(--muted);font-size:12px;margin-top:3px}.badge{border:1px solid #bdd0df;background:#edf5fb;border-radius:999px;padding:6px 9px;font-size:11px;font-weight:800;color:#35546c}.status{font-size:12px;color:var(--muted);margin:7px 0 10px}.status.bad{color:#b72d35}.panel{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:10px;overflow:auto}.canvas{width:100%;min-width:520px}.foot{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-top:8px;color:var(--muted);font-size:11px}.seat-info{font-weight:700;color:#2d4357}.legend{display:flex;gap:10px;flex-wrap:wrap}.dot{display:inline-block;width:9px;height:9px;border-radius:2px;vertical-align:-1px;margin-right:4px;border:1px solid rgba(0,0,0,.12)}
+svg{display:block;width:100%;height:auto;background:#fff;border-radius:10px}.seat{cursor:pointer}.seat:hover rect{stroke:#111f2d;stroke-width:2}.seat text{pointer-events:none;font-weight:800;fill:#162330}.decor-text{font-family:Arial,sans-serif;font-weight:900;fill:#203040}.stage-text{font-family:Arial,sans-serif;font-weight:900;fill:#fff;letter-spacing:2px}
+@media(max-width:650px){body{padding:6px}.canvas{min-width:420px}.title{font-size:18px}}
+</style>
+</head>
+<body>
+<div class="page">
+  <div class="top">
+    <div><div id="title" class="title">Завантаження…</div><div id="sub" class="sub">Venue Demo Server</div></div>
+    <div class="badge">DIRECT VENUE • NO POSTER / NO BACKGROUND</div>
+  </div>
+  <div id="status" class="status">Читаємо схему майданчика…</div>
+  <div class="panel"><div id="canvas" class="canvas"></div></div>
+  <div class="foot">
+    <div id="seatInfo" class="seat-info">Оберіть місце на схемі.</div>
+    <div class="legend"><span><i class="dot" style="background:#e2e8ee"></i>геометрія</span><span><i class="dot" style="background:#31b969"></i>доступно</span><span><i class="dot" style="background:#f0b33c"></i>HOLD</span><span><i class="dot" style="background:#697684"></i>продано</span></div>
+  </div>
+</div>
+<script>
+(() => {
+"use strict";
+const READ_URL="https://lyvdrqilglqwkmajmbai.supabase.co/functions/v1/venue-demo-read";
+const $=id=>document.getElementById(id);
+const qs=new URLSearchParams(location.search);
+const VENUE_ID=String(qs.get("venue")||"").trim();
+const SEANCE_ID=String(qs.get("seance")||qs.get("seance_id")||"").trim();
+const esc=v=>String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+if(!VENUE_ID||!SEANCE_ID){$('status').textContent='Потрібні параметри ?venue=...&seance=...';$('status').className='status bad';return;}
+
+async function load(){
+  const u=new URL(READ_URL);u.searchParams.set('venue_id',VENUE_ID);u.searchParams.set('seance_id',SEANCE_ID);
+  const t0=performance.now();
+  const r=await fetch(u,{cache:'no-store'});const d=await r.json().catch(()=>({}));
+  if(!r.ok||!d?.ok)throw new Error(d?.error||`HTTP ${r.status}`);
+  d.browser_ms=performance.now()-t0;render(d);
+}
+
+function render(d){
+  const g=d.geometry||{};const seats=Array.isArray(g.seats)?g.seats:[];const state=Array.isArray(d.seats)?d.seats:[];
+  const stateMap=new Map(state.map(x=>[String(x.seat_key),x]));
+  const W=Number(g.width||1000),H=Number(g.height||1200);
+  $('title').textContent=d.venue?.name||VENUE_ID;
+  $('sub').textContent=`${d.hall?.name||''} • ${d.seance?.show||SEANCE_ID} • ${d.seance?.date||''} ${String(d.seance?.time||'').slice(0,5)}`;
+  $('status').textContent=`DIRECT READ • geometry ${seats.length} • state ${state.length} • ${Number(d.browser_ms||0).toFixed(1)} ms`;
+
+  const decor=Array.isArray(g.decor)?g.decor:[];
+  const decorSvg=decor.map(o=>{
+    const type=String(o.type||'');
+    if(type==='stage'){
+      const w=Number(o.w||0),h=Number(o.h||0),x=Number(o.x||0)-w/2,y=Number(o.y||0)-h/2;
+      return `<g><rect x="${x}" y="${y}" width="${w}" height="${h}" rx="${Math.min(18,h/2)}" fill="${esc(o.fill||'#8c929a')}"/><text class="stage-text" x="${Number(o.x||0)}" y="${Number(o.y||0)+7}" text-anchor="middle" font-size="${Math.max(18,Number(o.size||26))}">${esc(o.text||'СЦЕНА')}</text></g>`;
+    }
+    if(type==='text'){
+      return `<text class="decor-text" x="${Number(o.x||0)}" y="${Number(o.y||0)+6}" text-anchor="middle" font-size="${Math.max(12,Number(o.size||16))}">${esc(o.text||'')}</text>`;
+    }
+    return '';
+  }).join('');
+
+  const seatSvg=seats.map(s=>{
+    const st=stateMap.get(String(s.seat_key));const current=String(st?.state||'geometry').toLowerCase();
+    let fill=st?.color||'#e2e8ee';
+    if(st){
+      if(current==='sold'||current==='used')fill='#697684';
+      else if(current==='hold'||current==='held')fill='#f0b33c';
+      else if(st.sale_enabled===true && !st.color)fill='#31b969';
+      else if(st.sale_enabled===false && !st.color)fill='#b8c2cc';
+    }
+    const w=Math.max(14,Number(s.w||14)),h=Math.max(14,Number(s.h||14));
+    const x=Number(s.x||0)-w/2,y=Number(s.y||0)-h/2;
+    const num=esc(s.seat_number??'');
+    const price=st?.price!=null?` • ${st.price} грн`:'';
+    const title=esc(`${s.seat_key} • ${current}${price}`);
+    return `<g class="seat" data-key="${esc(s.seat_key)}" data-state="${esc(current)}" data-price="${esc(st?.price??'')}"><title>${title}</title><rect x="${x}" y="${y}" width="${w}" height="${h}" rx="3" fill="${esc(fill)}" stroke="#9eabb6" stroke-width="1"/><text x="${Number(s.x||0)}" y="${Number(s.y||0)+3}" text-anchor="middle" font-size="8">${num}</text></g>`;
+  }).join('');
+
+  $('canvas').innerHTML=`<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Схема залу">${decorSvg}${seatSvg}</svg>`;
+  $('canvas').querySelectorAll('.seat').forEach(el=>el.addEventListener('click',()=>{
+    const price=el.dataset.price?` • ${el.dataset.price} грн`:'';
+    $('seatInfo').textContent=`${el.dataset.key} • ${el.dataset.state}${price}`;
+  }));
+}
+
+load().catch(e=>{$('status').textContent='Помилка: '+(e?.message||e);$('status').className='status bad';});
+})();
+</script>
+</body>
+</html>
