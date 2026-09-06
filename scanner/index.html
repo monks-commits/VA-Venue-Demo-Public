@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Сканер квитків — майданчик</title>
+<script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+<style>
+body{margin:0;background:#f5f6f8;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;color:#15171a}
+.wrap{max-width:720px;margin:auto;padding:16px}
+.card{background:#fff;border:1px solid #d9dee7;border-radius:16px;padding:14px;margin-bottom:12px}
+h1{margin:0 0 4px;font-size:24px}
+.sub,.hint,#venueLine,#seanceLine{color:#667085;font-size:13px}
+#venueLine{margin-top:4px}
+#seanceLine{margin-top:2px}
+#reader{min-height:260px;background:#111;border-radius:14px;overflow:hidden}
+.buttons{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:12px}
+button{border:0;border-radius:12px;padding:14px;font-weight:700;font-size:16px}
+#btnStart{background:#2057d4;color:#fff}
+#btnStop{background:#eceff4}
+#btnClear{width:100%;background:#fff;border:1px solid #d9dee7}
+label{display:block;font-size:13px;font-weight:700;margin:10px 0 6px}
+input{width:100%;box-sizing:border-box;border:1px solid #d9dee7;border-radius:10px;padding:11px;font-size:16px}
+.status{border:2px solid #d9dee7;border-radius:14px;padding:14px;min-height:110px;background:#fff}
+.status.ok{background:#e8f7ec;border-color:#46a35c}
+.status.warn{background:#fff6dd;border-color:#d7a21e}
+.status.bad{background:#fdeaea;border-color:#cf4141}
+.status-title{font-size:25px;font-weight:850}
+.status-details{margin-top:8px;font-size:16px}
+.status-qr{margin-top:10px;color:#667085;font:12px ui-monospace,Consolas,monospace;overflow-wrap:anywhere}
+</style>
+</head>
+<body>
+<main class="wrap">
+<header>
+  <h1 id="theatreName">Сканер квитків</h1>
+  <div class="sub">Контроль доступу • прямий контур майданчика</div>
+  <div id="venueLine">Майданчик: завантаження…</div>
+  <div id="seanceLine">Сеанс: завантаження…</div>
+</header>
+
+<section class="card">
+  <div id="reader"></div>
+  <div class="buttons">
+    <button id="btnStart">Запустити камеру</button>
+    <button id="btnStop" disabled>Зупинити</button>
+  </div>
+</section>
+
+<section class="card">
+  <label for="gate">Контролер / Вхід</label>
+  <input id="gate" value="gate-1" autocomplete="off">
+
+  <label for="secret">VENUE_DEMO_SCANNER_SECRET</label>
+  <input id="secret" type="password" autocomplete="off" placeholder="Вставте secret один раз">
+
+  <div class="hint">Secret зберігається тільки в localStorage цього браузера.</div>
+  <div style="height:10px"></div>
+  <button id="btnClear">Очистити secret на цьому пристрої</button>
+</section>
+
+<section id="statusBox" class="status ok">
+  <div id="stText" class="status-title">Готово</div>
+  <div id="stDetails" class="status-details">Запустіть камеру і скануйте QR.</div>
+  <div id="stQr" class="status-qr">—</div>
+</section>
+</main>
+
+<script src="./scanner.js"></script>
+</body>
+</html>
