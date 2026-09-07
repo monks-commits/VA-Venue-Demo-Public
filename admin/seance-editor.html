@@ -770,6 +770,7 @@ const db = PH_SUPABASE;
 const EDITOR_PARAMS = new URLSearchParams(location.search);
 const VENUE_ID = String(EDITOR_PARAMS.get("venue") || PhAuth.config.VENUE_ID || "").trim();
 const VENUE_READ_URL = `${PhAuth.config.SUPABASE_URL}/functions/v1/venue-demo-read`;
+const EDITOR_HALL_CONTEXT_RPC = "get_editor_hall_context";
 let CURRENT_VENUE_SEANCES = [];
 let ACCESS_PROFILE = null;
 
@@ -2263,63 +2264,49 @@ async function loadVenueHallGeometryForPreview(){
     throw new Error("Оберіть майданчик і зал.");
   }
 
-  const candidates = [];
-  const pushCandidate = value => {
-    const id = String(value || "").trim();
-    if (id && !candidates.includes(id)) candidates.push(id);
-  };
-
-  // Existing/opened seance has priority. For a brand-new unsaved seance we use
-  // any existing seance of the same hall only as a safe geometry carrier.
-  pushCandidate(LOADED_SEANCE_ID);
-  pushCandidate(venueSeanceSelect?.value);
-  CURRENT_VENUE_SEANCES.forEach(s => pushCandidate(s?.id));
-
-  for (const candidate of candidates) {
-    try {
-      const url = new URL(VENUE_READ_URL);
-      url.searchParams.set("venue_id", venueId);
-      url.searchParams.set("seance_id", candidate);
-
-      const response = await fetch(url.toString(), { cache: "no-store" });
-      const body = await response.json().catch(() => ({}));
-      if (!response.ok || body?.ok === false) continue;
-      if (String(body?.hall?.id || "") !== hallId) continue;
-
-      const geometry = body?.geometry || {};
-      const seats = Array.isArray(geometry.seats)
-        ? geometry.seats.map(s => ({
-            ...s,
-            key: s.key || s.seat_key,
-            seat_key: s.seat_key || s.key,
-            row: s.row ?? s.row_label,
-            row_label: s.row_label ?? s.row,
-            seat: s.seat ?? s.seat_number,
-            seat_number: s.seat_number ?? s.seat,
-            size: s.size ?? Math.max(Number(s.w || 14), Number(s.h || 14))
-          }))
-        : [];
-
-      return {
-        version: geometry.version || body?.hall?.geometry_version || 1,
-        format: geometry.format || "venue-demo-server",
-        title: geometry.title || body?.hall?.name || hallId,
-        width: Number(geometry.width || 1000),
-        height: Number(geometry.height || 1200),
-        background: geometry.background || null,
-        decor: Array.isArray(geometry.decor) ? geometry.decor : [],
-        seats,
-        _geometry_source_seance: candidate
-      };
-    } catch (_) {
-      // Try the next seance of the same selected hall.
+  const { data: body, error } = await db.rpc(
+    EDITOR_HALL_CONTEXT_RPC,
+    {
+      p_venue_id: venueId,
+      p_hall_id: hallId
     }
+  );
+
+  if (error) throw error;
+  if (!body?.ok) {
+    throw new Error(body?.error || "editor_hall_context_failed");
   }
 
-  throw new Error(
-    "Для цього залу ще немає доступного сеансу-носія геометрії. " +
-    "Збережіть перший чернетковий сеанс або додайте геометрію залу на Venue Demo Server."
-  );
+  const hallMeta = body?.hall || {};
+  const geometry = body?.geometry || {};
+  const seats = Array.isArray(geometry.seats)
+    ? geometry.seats.map(s => ({
+        ...s,
+        key: s.key || s.seat_key,
+        seat_key: s.seat_key || s.key,
+        row: s.row ?? s.row_label,
+        row_label: s.row_label ?? s.row,
+        seat: s.seat ?? s.seat_number,
+        seat_number: s.seat_number ?? s.seat,
+        size: s.size ?? Math.max(Number(s.w || 14), Number(s.h || 14))
+      }))
+    : [];
+
+  CURRENT_VENUE_SEANCES = Array.isArray(body?.seances)
+    ? body.seances.map(x => ({ ...x }))
+    : [];
+
+  return {
+    version: geometry.version || hallMeta.geometry_version || 1,
+    format: geometry.format || "venue-demo-server",
+    title: geometry.title || hallMeta.name || hallId,
+    width: Number(geometry.width || 1000),
+    height: Number(geometry.height || 1200),
+    background: geometry.background || null,
+    decor: Array.isArray(geometry.decor) ? geometry.decor : [],
+    seats,
+    _geometry_source: "hall_catalog"
+  };
 }
 
 async function renderPreview(){
@@ -2355,7 +2342,7 @@ async function renderPreview(){
     previewInfo.textContent =
       `Venue Demo Server • ${hallSelect?.options?.[hallSelect.selectedIndex]?.textContent || hallSelect?.value || "зал"}` +
       ` • geometry ${hall.seats.length}` +
-      (hall._geometry_source_seance ? ` • source ${hall._geometry_source_seance}` : "");
+      ` • source hall_catalog`;
 
   } catch (e) {
     previewInfo.textContent = `Не вдалося завантажити схему з Venue Demo Server: ${e.message || e}`;
@@ -2529,22 +2516,30 @@ async function loadVenueSeances(){
     `<option value="">Завантаження сеансів…</option>`;
 
   try {
-    let query = db
-      .from("seances")
-      .select("id,show,date,time,active,event_type,venue_id,hall_id,status")
-      .eq("venue_id", venueId)
-      .neq("status", "archived")
-      .order("date", { ascending:true })
-      .order("time", { ascending:true });
-
-    if (hallId) {
-      query = query.eq("hall_id", hallId);
+    if (!venueId || !hallId) {
+      CURRENT_VENUE_SEANCES = [];
+      venueSeanceSelect.innerHTML =
+        `<option value="">Оберіть майданчик і зал</option>`;
+      return;
     }
 
-    const { data: rows, error } = await query;
-    if (error) throw error;
+    const { data: body, error } = await db.rpc(
+      EDITOR_HALL_CONTEXT_RPC,
+      {
+        p_venue_id: venueId,
+        p_hall_id: hallId
+      }
+    );
 
-    const venueRows = Array.isArray(rows) ? rows : [];
+    if (error) throw error;
+    if (!body?.ok) {
+      throw new Error(body?.error || "editor_hall_context_failed");
+    }
+
+    const venueRows = Array.isArray(body?.seances)
+      ? body.seances
+      : [];
+
     CURRENT_VENUE_SEANCES = venueRows.map(x => ({ ...x }));
 
     if (!venueRows.length) {
@@ -2565,7 +2560,9 @@ async function loadVenueSeances(){
       `<option value="">Оберіть сеанс…</option>` +
       venueRows.map(s => {
         const title = s.show || s.id;
-        const dt = [s.date, String(s.time || "").slice(0,5)].filter(Boolean).join(" ");
+        const dt = [s.date, String(s.time || "").slice(0,5)]
+          .filter(Boolean)
+          .join(" ");
         const status = String(s.status || "draft");
         const statusLabel = statusLabels[status] || status;
         const visibilityLabel = s.active === false ? " • сайт: ні" : "";
@@ -2586,6 +2583,7 @@ async function loadVenueSeances(){
 
   } catch (e) {
     console.warn("loadVenueSeances error", e);
+    CURRENT_VENUE_SEANCES = [];
     venueSeanceSelect.innerHTML =
       `<option value="">Помилка завантаження</option>`;
   }
@@ -3197,12 +3195,22 @@ async function saveSeanceToServer({ publishNow = false } = {}) {
       showActive.value = currentActive ? "true" : "false";
     }
 
+    // The first saved seance becomes the geometry carrier immediately.
+    // This is important for a brand-new venue/hall (for example Opera),
+    // where there was no earlier seance to load the Venue Demo Server geometry from.
+    LOADED_SEANCE_ID = seance;
+    LOADED_HALL_ID = hallId;
+    CURRENT_HALL_ID = hallId;
+
     render();
     await loadVenueSeances();
 
     if (venueSeanceSelect) {
       venueSeanceSelect.value = seance;
     }
+
+    // Show the real hall immediately after the first draft save.
+    await renderPreview();
 
     alert(
       publishNow
@@ -3553,8 +3561,11 @@ async function bootEditor(){
   ensurePreviewUi();
   applyPermissionUi();
   render();
-  await renderPreview();
+
+  // Hall geometry belongs to the hall, not to a seance.
+  // Load both the hall scheme and all hall seances immediately.
   await loadVenueSeances();
+  await renderPreview();
 
   const params = new URLSearchParams(location.search);
   const seanceFromUrl =
