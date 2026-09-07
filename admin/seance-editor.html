@@ -1104,30 +1104,97 @@ function isLodgeSeat(seat){
   return /лож/i.test(zoneText) || /^(ll|lr)$/i.test(prefix);
 }
 
+function editorZoneDescriptor(seat){
+  const prefix = String(seat?.prefix || "").trim();
+  const rowRaw = String(seat?.row ?? "").trim();
+  const rowNum = Number(rowRaw);
+  const hallId = String(hallSelect?.value || CURRENT_HALL_ID || "").trim();
+
+  /*
+    Opera Stable v7 uses the same canonical prefix P for two physical zones:
+      P1-P13  = Партер
+      P14-P22 = Амфітеатр
+
+    The imported source also contains one legacy metadata anomaly: P2-M17 is
+    tagged as "Амфітеатр" although it belongs to the Parter row/key sequence.
+    We DO NOT rewrite geometry or seat keys here. The editor only restores the
+    physical zone boundary so pricing can be created as P1-13 and P14-22.
+  */
+  if (hallId === "opera-test" && prefix.toUpperCase() === "P" && Number.isFinite(rowNum)) {
+    if (rowNum >= 1 && rowNum <= 13) {
+      return {
+        id: "opera-test::P::parter",
+        prefix: "P",
+        label: "Партер"
+      };
+    }
+
+    if (rowNum >= 14 && rowNum <= 22) {
+      return {
+        id: "opera-test::P::amphitheatre",
+        prefix: "P",
+        label: "Амфітеатр"
+      };
+    }
+  }
+
+  const label = humanZoneLabel(seat?.zone, prefix, rowRaw);
+  return {
+    id: `${prefix}::${label}`,
+    prefix,
+    label
+  };
+}
+
+function editorZoneSortWeight(label){
+  const value = String(label || "").toLowerCase();
+  if (value.includes("партер")) return 10;
+  if (value.includes("амф")) return 20;
+  if (value === "балкон") return 30;
+  if (value.includes("лів") && value.includes("балкон")) return 40;
+  if (value.includes("прав") && value.includes("балкон")) return 50;
+  return 100;
+}
+
 function rowZoneGroupsFromHall(){
   const groups = new Map();
 
   hallSeats().forEach(seat => {
     if (isLodgeSeat(seat)) return;
 
-    const prefix = String(seat.prefix || "").trim();
     const row = String(seat.row ?? "").trim();
-    if (!prefix || row === "") return;
+    if (row === "") return;
 
-    const key = prefix;
-    if (!groups.has(key)) {
-      groups.set(key, {
-        prefix,
-        label: humanZoneLabel(seat.zone, prefix, row),
-        rows: new Set()
+    const descriptor = editorZoneDescriptor(seat);
+    if (!descriptor.prefix || !descriptor.id) return;
+
+    if (!groups.has(descriptor.id)) {
+      groups.set(descriptor.id, {
+        id: descriptor.id,
+        prefix: descriptor.prefix,
+        label: descriptor.label,
+        rows: new Set(),
+        seats: []
       });
     }
-    groups.get(key).rows.add(row);
+
+    const group = groups.get(descriptor.id);
+    group.rows.add(row);
+    group.seats.push(seat);
   });
 
-  return Array.from(groups.values()).sort((a,b) =>
-    a.label.localeCompare(b.label, "uk")
-  );
+  return Array.from(groups.values()).sort((a,b) => {
+    const weightDiff = editorZoneSortWeight(a.label) - editorZoneSortWeight(b.label);
+    if (weightDiff) return weightDiff;
+    const labelDiff = a.label.localeCompare(b.label, "uk");
+    if (labelDiff) return labelDiff;
+    return a.prefix.localeCompare(b.prefix, "uk");
+  });
+}
+
+function selectedEditorZoneGroup(selectEl){
+  const selectedId = String(selectEl?.value || "");
+  return rowZoneGroupsFromHall().find(group => group.id === selectedId) || null;
 }
 
 function lodgeGroupsFromHall(){
@@ -1192,7 +1259,8 @@ function fillZoneSelectFromHall(selectEl){
 
   groups.forEach(group => {
     const option = document.createElement("option");
-    option.value = group.prefix;
+    option.value = group.id;
+    option.dataset.prefix = group.prefix;
     const numericRows = Array.from(group.rows)
       .map(x => Number(x))
       .filter(Number.isFinite)
@@ -1204,7 +1272,7 @@ function fillZoneSelectFromHall(selectEl){
     selectEl.appendChild(option);
   });
 
-  if (groups.some(g => g.prefix === previous)) {
+  if (groups.some(g => g.id === previous)) {
     selectEl.value = previous;
   }
   setHallDisabled(selectEl, false);
@@ -1284,7 +1352,7 @@ function humanSeatLabel(key){
   const seat = seatByKey(key);
   if (!seat) return String(key || "");
 
-  const zoneLabel = humanZoneLabel(seat.zone, seat.prefix, seat.row);
+  const zoneLabel = editorZoneDescriptor(seat).label;
   const seatNum = Number(seat.seat || 0);
 
   if (isLodgeSeat(seat)) {
@@ -2885,14 +2953,14 @@ async function pastePricingFromClipboard(){
 }
 
 function addRule(){
-  const z = zone.value;
+  const group = selectedEditorZoneGroup(zone);
   const from = Number(fromRow.value);
   const to = Number(toRow.value);
   const p = price.value === "" ? null : Number(price.value);
   const c = color.value;
   const saleAllowed = sale.checked;
 
-  if (!z || !from || !to || p === null) {
+  if (!group || !from || !to || p === null) {
     alert("Вкажи зону, ряди і ціну");
     return;
   }
@@ -2904,7 +2972,7 @@ function addRule(){
 
   const matching = hallSeats().filter(seat =>
     !isLodgeSeat(seat) &&
-    String(seat.prefix || "") === z &&
+    editorZoneDescriptor(seat).id === group.id &&
     Number(seat.row) >= from &&
     Number(seat.row) <= to
   );
@@ -2914,7 +2982,29 @@ function addRule(){
     return;
   }
 
-  const key = `${z}${from}-${to}`;
+  /*
+    A pricing rule is stored in the canonical runtime form P1-13, B10-14, etc.
+    Before writing it, make sure the same prefix+row range does not contain a
+    different physical editor zone. This prevents one rule from leaking into
+    another zone when a hall reuses a prefix.
+  */
+  const spill = hallSeats().filter(seat =>
+    !isLodgeSeat(seat) &&
+    String(seat.prefix || "").trim() === group.prefix &&
+    Number(seat.row) >= from &&
+    Number(seat.row) <= to &&
+    editorZoneDescriptor(seat).id !== group.id
+  );
+
+  if (spill.length) {
+    alert(
+      "Цей діапазон перетинає іншу фізичну зону з тим самим префіксом. " +
+      "Звузьте ряди або використайте «Діапазон місць у рядах»."
+    );
+    return;
+  }
+
+  const key = `${group.prefix}${from}-${to}`;
 
   data.pricing[key] = {
     price: p,
@@ -2926,7 +3016,7 @@ function addRule(){
   renderPreview();
 }
 function addSeatSegment(){
-  const z = segZone.value;
+  const group = selectedEditorZoneGroup(segZone);
   const rowFrom = Number(segFromRow.value);
   const rowTo = Number(segToRow.value);
   const seatFrom = Number(segFromSeat.value);
@@ -2935,7 +3025,7 @@ function addSeatSegment(){
   const c = segColor.value;
   const saleAllowed = segSale.checked;
 
-  if (!z || !rowFrom || !rowTo || !seatFrom || !seatTo || !p) {
+  if (!group || !rowFrom || !rowTo || !seatFrom || !seatTo || !p) {
     alert("Вкажи зону, ряди, місця і ціну");
     return;
   }
@@ -2952,7 +3042,7 @@ function addSeatSegment(){
 
   const matching = hallSeats().filter(seat =>
     !isLodgeSeat(seat) &&
-    String(seat.prefix || "") === z &&
+    editorZoneDescriptor(seat).id === group.id &&
     Number(seat.row) >= rowFrom &&
     Number(seat.row) <= rowTo &&
     Number(seat.seat) >= seatFrom &&
