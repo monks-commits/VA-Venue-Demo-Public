@@ -771,6 +771,7 @@ const EDITOR_PARAMS = new URLSearchParams(location.search);
 const VENUE_ID = String(EDITOR_PARAMS.get("venue") || PhAuth.config.VENUE_ID || "").trim();
 const VENUE_READ_URL = `${PhAuth.config.SUPABASE_URL}/functions/v1/venue-demo-read`;
 const EDITOR_HALL_CONTEXT_RPC = "get_editor_hall_context";
+const EDITOR_SEANCE_CONTEXT_RPC = "get_editor_seance_context";
 let CURRENT_VENUE_SEANCES = [];
 let ACCESS_PROFILE = null;
 
@@ -1189,6 +1190,8 @@ function rowZoneGroupsFromHall(){
     const labelDiff = a.label.localeCompare(b.label, "uk");
     if (labelDiff) return labelDiff;
     return a.prefix.localeCompare(b.prefix, "uk");
+    syncEditorLocation();
+
   });
 }
 
@@ -3221,6 +3224,14 @@ async function saveSeanceToServer({ publishNow = false } = {}) {
       ? "seance.edit"
       : "seance.create";
 
+  try {
+    await refreshAccessProfileForVenue(venueId, requiredPermission);
+  } catch (error) {
+    console.error(error);
+    alert(`Недостатньо прав: ${requiredPermission}`);
+    return;
+  }
+
   if (!PhAuth.hasPermission(ACCESS_PROFILE, requiredPermission)) {
     alert(`Недостатньо прав: ${requiredPermission}`);
     return;
@@ -3298,6 +3309,7 @@ async function saveSeanceToServer({ publishNow = false } = {}) {
     if (venueSeanceSelect) {
       venueSeanceSelect.value = seance;
     }
+    syncEditorLocation();
 
     // Show the real hall immediately after the first draft save.
     await renderPreview();
@@ -3349,19 +3361,33 @@ async function loadSeance(){
   if (!seance) return;
 
   try {
-    const { data: seanceRow, error: seanceError } = await db
-      .from("seances")
-      .select(
-        "id,show,date,time,poster_url,venue_id,hall_id,status,event_type,genre,active"
-      )
-      .eq("id", seance)
-      .maybeSingle();
+    const { data: body, error } = await db.rpc(
+      EDITOR_SEANCE_CONTEXT_RPC,
+      { p_seance_id: seance }
+    );
 
-    if (seanceError) throw seanceError;
+    if (error) throw error;
+    if (!body?.ok || !body?.seance) {
+      throw new Error(body?.error || "editor_seance_context_failed");
+    }
 
-    if (!seanceRow) {
-      alert("Сеанс не знайдено або немає права перегляду.");
-      return;
+    const seanceRow = body.seance;
+    const pricingRow = body.pricing || null;
+
+    const loadedVenueId = normalizeVenueIdForDb(seanceRow.venue_id);
+    const authoritativeHallId = String(
+      seanceRow.hall_id || pricingRow?.hall_id || ""
+    ).trim();
+
+    // Permissions are venue-scoped. Do not keep the Academy/Philharmonic
+    // profile when the user switches to Opera in the same editor tab.
+    await refreshAccessProfileForVenue(loadedVenueId, "seance.view_all");
+
+    if (CONFIG_VENUES.some(v => v.id === loadedVenueId)) {
+      venueSelect.value = loadedVenueId;
+      SUPPRESS_HALL_CHANGE = true;
+      fillHallSelect(loadedVenueId, authoritativeHallId);
+      SUPPRESS_HALL_CHANGE = false;
     }
 
     showName.value = seanceRow.show || "";
@@ -3375,30 +3401,8 @@ async function loadSeance(){
     eventType.value = seanceRow.event_type || "";
     updateGenreSelect(seanceRow.genre || "");
 
-    const loadedVenueId =
-      normalizeVenueIdForDb(seanceRow.venue_id);
-
-    if (CONFIG_VENUES.some(v => v.id === loadedVenueId)) {
-      venueSelect.value = loadedVenueId;
-      SUPPRESS_HALL_CHANGE = true;
-      fillHallSelect(loadedVenueId, seanceRow.hall_id || "");
-      SUPPRESS_HALL_CHANGE = false;
-    }
-
-    const { data: pricingRow, error: pricingError } = await db
-      .from("seances_pricing")
-      .select("pricing,seat_overrides,hall_id,venue_id")
-      .eq("seance_id", seance)
-      .maybeSingle();
-
-    if (pricingError) throw pricingError;
-
     data.pricing = pricingRow?.pricing || {};
-    data.seat_overrides =
-      pricingRow?.seat_overrides || {};
-
-    const authoritativeHallId =
-      String(seanceRow.hall_id || pricingRow?.hall_id || hallSelect?.value || "").trim();
+    data.seat_overrides = pricingRow?.seat_overrides || {};
 
     if (
       seanceRow.hall_id &&
@@ -3410,24 +3414,20 @@ async function loadSeance(){
       );
     }
 
-    if (authoritativeHallId) {
-      SUPPRESS_HALL_CHANGE = true;
-      fillHallSelect(loadedVenueId, authoritativeHallId);
-      SUPPRESS_HALL_CHANGE = false;
-      CURRENT_HALL_ID = authoritativeHallId;
-    }
-
+    CURRENT_HALL_ID = authoritativeHallId;
     LOADED_SEANCE_ID = seanceRow.id;
     LOADED_HALL_ID = authoritativeHallId;
 
     render();
+    await loadVenueSeances();
+    if (venueSeanceSelect) venueSeanceSelect.value = seanceRow.id;
     await renderPreview();
     applyPermissionUi();
+    syncEditorLocation();
 
   } catch (error) {
     console.error(error);
-    alert(`Не вдалося завантажити сеанс:
-${error.message}`);
+    alert(`Не вдалося завантажити сеанс:\n${error.message}`);
   }
 }
 
@@ -3441,6 +3441,13 @@ lodgeZone?.addEventListener("change", applyLodgeSelectionLimits);
 
 if (venueSelect) {
   venueSelect.addEventListener("change", async () => {
+    try {
+      await refreshAccessProfileForVenue(venueToDbVenueId(venueSelect.value), "seance.view_all");
+    } catch (error) {
+      console.error(error);
+      alert("Немає доступу до вибраного майданчика.");
+      return;
+    }
     // Не переносимо стан завантаженого сеансу між майданчиками.
     LOADED_SEANCE_ID = "";
     LOADED_HALL_ID = "";
@@ -3454,6 +3461,8 @@ if (venueSelect) {
     render();
     await renderPreview();
     await loadVenueSeances();
+    syncEditorLocation();
+
   });
 }
 
@@ -3558,6 +3567,60 @@ function applyEditorUrlParams(){
 
 
   
+async function refreshAccessProfileForVenue(venueId, requiredPermission = "seance.view_all"){
+  const targetVenue = normalizeVenueIdForDb(venueId || venueSelect?.value || "");
+  if (!targetVenue) throw new Error("venue_id_required");
+
+  await PhAuth.requireSession();
+
+  const { data: profile, error } = await db.rpc(
+    "get_my_access_profile",
+    { p_venue_id: targetVenue }
+  );
+
+  if (error) throw error;
+  if (!profile) throw new Error("staff_access_denied");
+
+  if (
+    requiredPermission &&
+    !PhAuth.hasPermission(profile, requiredPermission)
+  ) {
+    throw new Error(`permission_denied:${requiredPermission}`);
+  }
+
+  ACCESS_PROFILE = profile;
+
+  const userBadge = document.getElementById("userBadge");
+  if (userBadge) {
+    userBadge.textContent =
+      `${profile.display_name || "Користувач"} • ${(profile.roles || []).join(", ")}`;
+  }
+
+  applyPermissionUi();
+  return profile;
+}
+
+function syncEditorLocation(){
+  try {
+    const url = new URL(location.href);
+    const venue = normalizeVenueIdForDb(venueSelect?.value || "");
+    const hall = String(hallSelect?.value || "").trim();
+    const seance = String(LOADED_SEANCE_ID || venueSeanceSelect?.value || seanceId?.value || "").trim();
+
+    if (venue) url.searchParams.set("venue", venue);
+    else url.searchParams.delete("venue");
+
+    if (hall) url.searchParams.set("hall", hall);
+    else url.searchParams.delete("hall");
+
+    if (seance) url.searchParams.set("seance", seance);
+    else url.searchParams.delete("seance");
+
+    url.searchParams.delete("seance_id");
+    history.replaceState(null, "", url.pathname + url.search + url.hash);
+  } catch (_) {}
+}
+
 function applyPermissionUi(){
   const canCreate =
     PhAuth.hasPermission(ACCESS_PROFILE, "seance.create");
@@ -3614,22 +3677,10 @@ function applyPermissionUi(){
 
 async function bootEditor(){
   try {
-    ACCESS_PROFILE = await PhAuth.requirePermission(
-      "seance.view_all",
-      VENUE_ID
-    );
-
-    const userBadge = document.getElementById("userBadge");
-    if (userBadge) {
-      userBadge.textContent =
-        `${ACCESS_PROFILE.display_name} • ${ACCESS_PROFILE.roles.join(", ")}`;
-    }
-
+    await PhAuth.requireSession();
   } catch (error) {
     if (error.message === "authentication_required") return;
-
-    alert("Доступ до редактора заборонено.");
-    location.replace("./platform-admin.html");
+    alert("Не вдалося відновити авторизацію.");
     return;
   }
 
@@ -3645,15 +3696,28 @@ async function bootEditor(){
   applyEditorUrlParams();
   if (EDITOR_PARAMS.get("venue") && venueSelect) {
     venueSelect.value = normalizeVenueIdForDb(EDITOR_PARAMS.get("venue"));
+    fillHallSelect(venueSelect.value, EDITOR_PARAMS.get("hall") || "");
   }
   CURRENT_HALL_ID = String(hallSelect?.value || "").trim();
+
+  try {
+    await refreshAccessProfileForVenue(
+      venueToDbVenueId(venueSelect.value),
+      "seance.view_all"
+    );
+  } catch (error) {
+    console.error("editor access error", error);
+    alert("Доступ до редактора цього майданчика заборонено.");
+    location.replace("./platform-admin.html");
+    return;
+  }
 
   ensurePreviewUi();
   applyPermissionUi();
   render();
+  syncEditorLocation();
 
   // Hall geometry belongs to the hall, not to a seance.
-  // Load both the hall scheme and all hall seances immediately.
   await loadVenueSeances();
   await renderPreview();
 
@@ -3663,6 +3727,7 @@ async function bootEditor(){
     params.get("seance_id");
 
   if (seanceFromUrl) {
+    seanceId.value = seanceFromUrl;
     await loadSeance();
   }
 }
